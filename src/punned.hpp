@@ -195,36 +195,48 @@ struct uuid_t {
     std::uint8_t octets[16];
 };
 
-template <typename callback_at> //
-void multithreaded(std::size_t threads, std::size_t tasks, callback_at&& callback) {
-
-    if (threads == 0)
-        threads = std::thread::hardware_concurrency();
-    if (threads == 1 || tasks <= 128) {
-        for (std::size_t task_idx = 0; task_idx < tasks; ++task_idx)
-            callback(0, task_idx);
-        return;
-    }
-
 #if defined(USEARCH_USE_OPENMP)
-    omp_set_num_threads(threads);
+
+struct bulk_openmp_executor_t {
+
+    bulk_openmp_executor_t() {}
+    bulk_openmp_executor_t(std::size_t threads) { omp_set_num_threads(threads); }
+
+    template <typename function_at> void operator()(std::size_t invocations, function_at&& function) const {
 #pragma omp parallel for schedule(dynamic)
-    for (std::size_t i = 0; i < tasks; ++i)
-        callback(omp_get_thread_num(), i);
-#else
-    std::vector<std::thread> threads_pool;
-    std::size_t tasks_per_thread = (tasks / threads) + ((tasks % threads) != 0);
-    for (std::size_t thread_idx = 0; thread_idx != threads; ++thread_idx) {
-        threads_pool.emplace_back([=]() {
-            for (std::size_t task_idx = thread_idx * tasks_per_thread;
-                 task_idx < (std::min)(tasks, thread_idx * tasks_per_thread + tasks_per_thread); ++task_idx)
-                callback(thread_idx, task_idx);
-        });
+        for (std::size_t i = 0; i < invocations; ++i)
+            function(i, omp_get_thread_num());
     }
-    for (std::size_t thread_idx = 0; thread_idx != threads; ++thread_idx)
-        threads_pool[thread_idx].join();
+};
+
+using bulk_executor_t = bulk_openmp_executor_t;
+
+#else
+
+class bulk_stl_executor_t {
+    std::size_t threads_;
+
+  public:
+    bulk_stl_executor_t(std::size_t threads = std::thread::hardware_concurrency()) : threads_(threads) {}
+
+    template <typename function_at> void operator()(std::size_t tasks, function_at&& function) const {
+        std::vector<std::thread> threads_pool;
+        std::size_t tasks_per_thread = (tasks / threads) + ((tasks % threads) != 0);
+        for (std::size_t thread_idx = 0; thread_idx != threads; ++thread_idx) {
+            threads_pool.emplace_back([=]() {
+                for (std::size_t task_idx = thread_idx * tasks_per_thread;
+                     task_idx < (std::min)(tasks, thread_idx * tasks_per_thread + tasks_per_thread); ++task_idx)
+                    function(task_idx, thread_idx);
+            });
+        }
+        for (std::size_t thread_idx = 0; thread_idx != threads; ++thread_idx)
+            threads_pool[thread_idx].join();
+    }
+};
+
+using bulk_executor_t = bulk_stl_executor_t;
+
 #endif
-}
 
 /**
  *  @brief Relies on `posix_memalign` for aligned memory allocations.
@@ -440,6 +452,7 @@ class punned_gt {
     std::size_t casted_vector_bytes_ = 0;
     accuracy_t accuracy_ = accuracy_t::f32_k;
     isa_t acceleration_ = isa_t::auto_k;
+    float max_tombstones_share_ = 0.3f;
 
     index_t* typed_{};
     mutable std::vector<byte_t> cast_buffer_{};
@@ -465,6 +478,7 @@ class punned_gt {
 
     mutable shared_mutex_t lookup_table_mutex_;
     tsl::robin_map<label_t, id_t> lookup_table_;
+    std::vector<id_t> removed_;
 
   public:
     using search_result_t = typename index_t::search_result_t;
@@ -527,6 +541,11 @@ class punned_gt {
         return typed_->memory_usage(allocator_entry_bytes);
     }
 
+    struct removal_result_t {
+        bool found{};
+        bool removed{};
+    };
+
     // clang-format off
     add_result_t add(label_t label, f8_bits_t const* vector) { return add_(label, vector, casts_.from_f8); }
     add_result_t add(label_t label, f16_bits_t const* vector) { return add_(label, vector, casts_.from_f16); }
@@ -563,6 +582,8 @@ class punned_gt {
     void reconstruct(label_t label, f32_t* vector) const { return reconstruct_(label, vector, casts_.to_f32); }
     void reconstruct(label_t label, f64_t* vector) const { return reconstruct_(label, vector, casts_.to_f64); }
 
+    removal_result_t remove(label_t label) { return remove_(label); }
+
     static punned_gt ip(std::size_t dimensions, accuracy_t accuracy = accuracy_t::f16_k, index_config_t config = {}) { return make_(dimensions, accuracy, ip_metric_(dimensions, accuracy), make_casts_(accuracy), config); }
     static punned_gt l2sq(std::size_t dimensions, accuracy_t accuracy = accuracy_t::f16_k, index_config_t config = {}) { return make_(dimensions, accuracy, l2_metric_(dimensions, accuracy), make_casts_(accuracy), config); }
     static punned_gt cos(std::size_t dimensions, accuracy_t accuracy = accuracy_t::f32_k, index_config_t config = {}) { return make_(dimensions, accuracy, cos_metric_(dimensions, accuracy), make_casts_(accuracy), config); }
@@ -586,11 +607,15 @@ class punned_gt {
         result.casts_ = casts_;
 
         result.root_metric_ = root_metric_;
-        index_t* raw = aligned_index_alloc_();
-        new (raw) index_t(config(), root_metric_);
-        result.typed_ = raw;
+        index_t* typed = aligned_index_alloc_();
+        new (typed) index_t(config(), root_metric_);
+        result.typed_ = typed;
 
         return result;
+    }
+
+    template <typename executor_at> void merge(punned_gt& other, executor_at&& executor) {
+        return typed_.merge(other.typed_, executor);
     }
 
   private:
@@ -684,6 +709,22 @@ class punned_gt {
     id_t lookup_id_(label_t label) const {
         shared_lock_t lock(lookup_table_mutex_);
         return lookup_table_.at(label);
+    }
+
+    removal_result_t remove_(label_t label) {
+
+        unique_lock_t lock(lookup_table_mutex_);
+        auto id_iterator = lookup_table_.find(label);
+        if (id_iterator == lookup_table_.end())
+            return removal_result_t{false, false};
+        lookup_table_.erase(id_iterator);
+        removed_.push_back(id_iterator.second);
+        if (size() * max_tombstones_share_ > removed_.size())
+            return removal_result_t{true, true};
+
+        // If the number of tombstones exceeded the limit and we have reached this place,
+        // we need to concurrently purge all the entries.
+        return {};
     }
 
     template <typename scalar_at> void reconstruct_(label_t label, scalar_at* reconstructed, cast_t const& cast) const {

@@ -379,3 +379,32 @@ class Index:
 
     def remove(self, label: int):
         pass
+
+    @property
+    def levels(self) -> int:
+        return self._compiled.levels
+
+    @property
+    def level_size(self, level: int) -> int:
+        return self._compiled.level_size(level)
+
+    def __repr__(self) -> str:
+        return f'usearch.Index({self.dtype} x {self.ndim}, {self.metric}, expansion: {self.expansion_add} & {self.expansion_search}, {len(self)} vectors across {self.levels} levels)'
+
+    def _repr_pretty_(self) -> str:
+        level_sizes = [
+            f'--- {i}. {self.level_size(i)} nodes' for i in self.levels]
+        return '\n'.join([
+            'usearch.Index',
+            '- config'
+            f'-- data type: {self.dtype}',
+            f'-- dimensions: {self.ndim}',
+            f'-- metric: {self.metric}',
+            f'-- expansion on addition:{self.expansion_add} candidates',
+            f'-- expansion on search: {self.expansion_search} candidates',
+            '- state',
+            f'-- size: {self.size} vectors',
+            f'-- memory usage: {self.memory_usage} bytes',
+            f'-- levels: {self.levels}',
+            *level_sizes,
+        ])

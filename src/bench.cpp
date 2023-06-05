@@ -271,7 +271,9 @@ struct running_stats_printer_t {
 };
 
 template <typename index_at, typename vector_id_at, typename real_at>
-void index_many(index_at& native, std::size_t n, vector_id_at const* ids, real_at const* vectors, std::size_t dims) {
+void index_many(                             //
+    index_at& native, std::size_t expansion, //
+    std::size_t n, vector_id_at const* ids, real_at const* vectors, std::size_t dims) {
 
     running_stats_printer_t printer{n, "Indexing"};
 
@@ -280,6 +282,7 @@ void index_many(index_at& native, std::size_t n, vector_id_at const* ids, real_a
         add_config_t config;
         config.thread = omp_get_thread_num();
         config.store_vector = true;
+        config.expansion = expansion;
         vector_view_t vector{vectors + dims * i, dims};
         native.add(ids[i], vector, config);
         printer.progress++;
@@ -290,8 +293,8 @@ void index_many(index_at& native, std::size_t n, vector_id_at const* ids, real_a
 
 template <typename index_at, typename vector_id_at, typename real_at>
 void search_many( //
-    index_at& native, std::size_t n, real_at const* vectors, std::size_t dims, std::size_t wanted, vector_id_at* ids,
-    real_at* distances) {
+    index_at& native, std::size_t expansion, std::size_t n, real_at const* vectors, std::size_t dims,
+    std::size_t wanted, vector_id_at* ids, real_at* distances) {
 
     std::string name = "Search " + std::to_string(wanted);
     running_stats_printer_t printer{n, name.c_str()};
@@ -300,6 +303,7 @@ void search_many( //
     for (std::size_t i = 0; i < n; ++i) {
         search_config_t config;
         config.thread = omp_get_thread_num();
+        config.expansion = expansion;
         vector_view_t vector{vectors + dims * i, dims};
         native.search(vector, wanted, config).dump_to(ids + wanted * i, distances + wanted * i);
         printer.progress++;
@@ -638,16 +642,16 @@ int main(int argc, char** argv) {
 
     index_config_t config;
     config.connectivity = args.connectivity;
-    config.expansion_add = args.expansion_add;
-    config.expansion_search = args.expansion_search;
+    // config.expansion_add = args.expansion_add;
+    // config.expansion_search = args.expansion_search;
     index_limits_t limits;
     limits.threads_add = limits.threads_search = args.threads;
     limits.elements = dataset.vectors_count();
 
     std::printf("- Index: \n");
     std::printf("-- Connectivity: %zu\n", config.connectivity);
-    std::printf("-- Expansion @ Add: %zu\n", config.expansion_add);
-    std::printf("-- Expansion @ Search: %zu\n", config.expansion_search);
+    // std::printf("-- Expansion @ Add: %zu\n", config.expansion_add);
+    // std::printf("-- Expansion @ Search: %zu\n", config.expansion_search);
 
     if (args.big)
         run_big_or_small<uint40_t>(dataset, args, config, limits);

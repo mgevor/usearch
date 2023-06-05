@@ -546,6 +546,9 @@ template <typename index_at> void view_index(index_at& index, std::string const&
 template <typename index_at> void clear_index(index_at& index) { index.clear(); }
 template <typename index_at> std::size_t get_expansion_add(index_at const &index) { return index.config().expansion_add; }
 template <typename index_at> std::size_t get_expansion_search(index_at const &index) { return index.config().expansion_search; }
+template <typename index_at> std::size_t get_levels(index_at const &index) { return index.max_level(); }
+template <typename index_at> index_at::stats_t compute_stats(index_at const &index) { return index.stats(); }
+template <typename index_at> index_at::stats_t compute_level_stats(index_at const &index, std::size_t level) { return index.stats(level); }
 // clang-format on
 
 template <typename element_at> bool has_duplicates(element_at const* begin, element_at const* end) {
@@ -727,6 +730,16 @@ PYBIND11_MODULE(compiled, m) {
     i.def("load", &load_index<punned_index_py_t>, py::arg("path"));
     i.def("view", &view_index<punned_index_py_t>, py::arg("path"));
     i.def("clear", &clear_index<punned_index_py_t>);
+
+    auto i_stats = py::class_<punned_index_py_t::stats_t>(m, "IndexStats");
+    i_stats.def_property("nodes", &punned_index_py_t::stats_t::nodes);
+    i_stats.def_property("edges", &punned_index_py_t::stats_t::edges);
+    i_stats.def_property("max_edges", &punned_index_py_t::stats_t::max_edges);
+    i_stats.def_property("allocated_bytes", &punned_index_py_t::stats_t::allocated_bytes);
+
+    i.def_property_readonly("levels", &get_levels<punned_index_py_t>);
+    i.def("stats", &compute_stats<punned_index_py_t>);
+    i.def("stats", &compute_level_stats<punned_index_py_t>, py::arg("level"));
 
     auto bi = py::class_<bits_index_py_t>(m, "BitsIndex");
 
