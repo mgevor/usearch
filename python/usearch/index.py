@@ -4,7 +4,7 @@
 # into the primary `Index` class, connecting USearch with Numba.
 import os
 from math import sqrt
-from typing import Optional, Callable, Union, NamedTuple, List
+from typing import Optional, Callable, Union, NamedTuple, List, Iterable
 
 import numpy as np
 
@@ -17,6 +17,9 @@ from usearch.compiled import (
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
+
+    USES_OPENMP,
+    USES_SIMSIMD,
 )
 
 BitwiseMetricKind = (
@@ -27,94 +30,53 @@ BitwiseMetricKind = (
 
 SetsIndex = _CompiledSetsIndex
 
+Label = np.longlong
+
 
 class Matches(NamedTuple):
     labels: np.ndarray
     distances: np.ndarray
-    counts: np.ndarray
+    counts: Union[np.ndarray, int]
 
+    @property
+    def is_batch(self) -> bool:
+        return isinstance(self.counts, np.ndarray)
 
-def list_matches(results: Matches, row: int) -> List[dict]:
+    @property
+    def batch_size(self) -> int:
+        return len(self.counts) if isinstance(self.counts, np.ndarray) else 1
 
-    count = results[2][row]
-    labels = results[0][row, :count]
-    distances = results[1][row, :count]
-    return [
-        {'label': int(label), 'distance': float(distance)}
-        for label, distance in zip(labels, distances)
-    ]
+    @property
+    def total_matches(self) -> int:
+        return np.sum(self.counts)
 
+    def to_list(self, row: Optional[int] = None) -> Union[List[dict], List[List[dict]]]:
 
-def jit_metric(ndim: int, metric: MetricKind, dtype: str = 'f32') -> Callable:
+        if not self.is_batch:
+            assert row is None, 'Exporting a single sequence is only for batch requests'
+            labels = self.labels
+            distances = self.distances
 
-    try:
-        from numba import cfunc, types, carray
-    except ImportError:
-        raise ModuleNotFoundError(
-            'To use JIT install Numba with `pip install numba`.'
-            'Alternatively, reinstall usearch with `pip install usearch[jit]`')
+        elif row is None:
+            return [self.to_list(i) for i in range(self.batch_size)]
 
-    # Showcases how to use Numba to JIT-compile similarity measures for USearch.
-    # https://numba.readthedocs.io/en/stable/reference/jit-compilation.html#c-callbacks
+        else:
+            count = self.counts[row]
+            labels = self.labels[row, :count]
+            distances = self.distances[row, :count]
 
-    if dtype == 'f32':
-        signature = types.float32(
-            types.CPointer(types.float32),
-            types.CPointer(types.float32),
-            types.uint64, types.uint64)
+        return [
+            {'label': int(label), 'distance': float(distance)}
+            for label, distance in zip(labels, distances)
+        ]
 
-        if metric == MetricKind.IP:
+    def recall_first(self, expected: np.ndarray) -> float:
+        best_matches = self.labels if not self.is_batch else self.labels[:, 0]
+        return np.sum(best_matches == expected) / len(expected)
 
-            @cfunc(signature)
-            def numba_ip(a, b, _n, _m):
-                a_array = carray(a, ndim)
-                b_array = carray(b, ndim)
-                ab = 0.0
-                for i in range(ndim):
-                    ab += a_array[i] * b_array[i]
-                return 1 - ab
-
-            return numba_ip
-
-        if metric == MetricKind.Cos:
-
-            @cfunc(signature)
-            def numba_cos(a, b, _n, _m):
-                a_array = carray(a, ndim)
-                b_array = carray(b, ndim)
-                ab = 0.0
-                a_sq = 0.0
-                b_sq = 0.0
-                for i in range(ndim):
-                    ab += a_array[i] * b_array[i]
-                    a_sq += a_array[i] * a_array[i]
-                    b_sq += b_array[i] * b_array[i]
-                a_norm = sqrt(a_sq)
-                b_norm = sqrt(b_sq)
-                if a_norm == 0 and b_norm == 0:
-                    return 0
-                elif a_norm == 0 or b_norm == 0 or ab == 0:
-                    return 1
-                else:
-                    return 1 - ab / (a_norm * b_norm)
-
-            return numba_cos
-
-        if metric == MetricKind.L2sq:
-
-            @cfunc(signature)
-            def numba_l2sq(a, b, _n, _m):
-                a_array = carray(a, ndim)
-                b_array = carray(b, ndim)
-                ab_delta_sq = types.float32(0.0)
-                for i in range(ndim):
-                    ab_delta_sq += (a_array[i] - b_array[i]) * \
-                        (a_array[i] - b_array[i])
-                return ab_delta_sq
-
-            return numba_l2sq
-
-    return None
+    def __repr__(self) -> str:
+        return f'usearch.Matches({self.total_matches})' if self.is_batch else \
+            f'usearch.Matches({self.total_matches} across {self.batch_size} queries)'
 
 
 class Index:
@@ -130,7 +92,7 @@ class Index:
     def __init__(
         self,
         ndim: int,
-        metric: Union[MetricKind, Callable] = MetricKind.IP,
+        metric: Union[MetricKind, Callable, str] = MetricKind.IP,
         dtype: Optional[str] = None,
         jit: bool = False,
 
@@ -148,11 +110,11 @@ class Index:
         :type ndim: int
 
         :param metric: Distance function, defaults to MetricKind.IP
-        :type metric: Union[MetricKind, Callable], optional
+        :type metric: Union[MetricKind, Callable, str], optional
             Kind of the distance function, or the Numba `cfunc` JIT-compiled object.
-            Possible `MetricKind` values: IP, Cosine, L2sq, Haversine, 
-            Hamming, Tanimoto, Sorensen.
-            Not every kind is JIT-able.
+            Possible `MetricKind` values: IP, Cos, L2sq, Haversine, Pearson,
+            BitwiseHamming, BitwiseTanimoto, BitwiseSorensen.
+            Not every kind is JIT-able. For Jaccard distance, use `SetsIndex`.
 
         :param dtype: Scalar type for internal vector storage, defaults to None
         :type dtype: str, optional
@@ -196,6 +158,18 @@ class Index:
 
         if metric is None:
             metric = MetricKind.IP
+        elif isinstance(metric, str):
+            _normalize = {
+                'cos': MetricKind.Cos,
+                'ip': MetricKind.IP,
+                'l2_sq': MetricKind.L2sq,
+                'haversine': MetricKind.Haversine,
+                'perason': MetricKind.Pearson,
+                'hamming': MetricKind.BitwiseHamming,
+                'tanimoto': MetricKind.BitwiseTanimoto,
+                'sorensen': MetricKind.BitwiseSorensen,
+            }
+            metric = _normalize[metric.lower()]
 
         if isinstance(metric, Callable):
             self._metric_kind = MetricKind.Unknown
@@ -204,10 +178,18 @@ class Index:
 
         elif isinstance(metric, MetricKind):
             if jit:
+
+                try:
+                    from usearch.numba import jit
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        'To use JIT install Numba with `pip install numba`.'
+                        'Alternatively, reinstall usearch with `pip install usearch[jit]`')
+
                 self._metric_kind = metric
-                self._metric_jit = jit_metric(
+                self._metric_jit = jit(
                     ndim=ndim,
-                    metric_kind=metric,
+                    metric=metric,
                     dtype=dtype,
                 )
                 self._metric_pointer = self._metric_jit.address if \
@@ -251,7 +233,7 @@ class Index:
 
     def add(
             self, labels, vectors, *,
-            copy: bool = True, threads: int = 0):
+            copy: bool = True, threads: int = 0) -> Union[int, np.ndarray]:
         """Inserts one or move vectors into the index.
 
         For maximal performance the `labels` and `vectors`
@@ -266,7 +248,7 @@ class Index:
         pass `copy=False`, if you can guarantee the lifetime of the
         primary vectors store during the process of construction.
 
-        :param labels: Unique identifier for passed vectors.
+        :param labels: Unique identifier for passed vectors, optional
         :type labels: Buffer
         :param vectors: Collection of vectors.
         :type vectors: Buffer
@@ -274,6 +256,9 @@ class Index:
         :type copy: bool, optional
         :param threads: Optimal number of cores to use, defaults to 0
         :type threads: int, optional
+
+        :return: Inserted label or labels
+        :type: Union[int, np.ndarray]
         """
         assert isinstance(vectors, np.ndarray), 'Expects a NumPy array'
         assert vectors.ndim == 1 or vectors.ndim == 2, 'Expects a matrix or vector'
@@ -289,11 +274,12 @@ class Index:
                 labels = start_id
         if isinstance(labels, np.ndarray):
             labels = labels.astype(np.longlong)
+        elif isinstance(labels, Iterable):
+            labels = np.array(labels, dtype=np.longlong)
 
         self._compiled.add(labels, vectors, copy=copy, threads=threads)
 
-        if generate_labels:
-            return labels
+        return labels
 
     def search(
             self, vectors, k: int = 10, *,
@@ -318,8 +304,24 @@ class Index:
         )
         return Matches(*tuple_)
 
+    @property
+    def specs(self) -> dict:
+        return {
+            'Class': 'usearch.Index',
+            'Connectivity': self.connectivity,
+            'Size': self.size,
+            'Dimensions': self.ndim,
+            'Expansion@Add': self.expansion_add,
+            'Expansion@Search': self.expansion_search,
+            'OpenMP': USES_OPENMP,
+            'SimSIMD': USES_SIMSIMD,
+            'JIT': self.jit,
+            'DType': self.dtype,
+            'Path': self.path,
+        }
+
     def __len__(self) -> int:
-        return len(self._compiled)
+        return self._compiled.__len__()
 
     @property
     def jit(self) -> bool:
@@ -332,6 +334,10 @@ class Index:
     @property
     def ndim(self) -> int:
         return self._compiled.ndim
+
+    @property
+    def metric(self) -> MetricKind:
+        return self._metric_kind
 
     @property
     def dtype(self) -> str:
@@ -358,11 +364,11 @@ class Index:
         return self._compiled.expansion_search
 
     @expansion_add.setter
-    def change_expansion_add(self, v: int):
+    def expansion_add(self, v: int):
         self._compiled.expansion_add = v
 
     @expansion_search.setter
-    def change_expansion_search(self, v: int):
+    def expansion_search(self, v: int):
         self._compiled.expansion_search = v
 
     def save(self, path: os.PathLike):
@@ -408,3 +414,16 @@ class Index:
             f'-- levels: {self.levels}',
             *level_sizes,
         ])
+
+    @property
+    def labels(self) -> np.ndarray:
+        return self._compiled.labels
+
+    def __delitem__(self, label: int):
+        raise NotImplementedError()
+
+    def __contains__(self, label: int) -> bool:
+        return self._compiled.__contains__(label)
+
+    def __getitem__(self, label: int) -> np.ndarray:
+        return self._compiled.__getitem__(label)

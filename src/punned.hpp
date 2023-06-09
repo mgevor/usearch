@@ -33,6 +33,14 @@
 namespace unum {
 namespace usearch {
 
+enum class common_scalar_kind_t {
+    f64_k,
+    f32_k,
+    f16_k,
+    f8_k,
+    b1_k,
+};
+
 using byte_t = char;
 using punned_distance_t = float;
 using punned_metric_t = punned_distance_t (*)(byte_t const*, byte_t const*, std::size_t, std::size_t);
@@ -545,6 +553,17 @@ class punned_gt {
         bool found{};
         bool removed{};
     };
+
+    bool contains(label_t label) const {
+        shared_lock_t lock(lookup_table_mutex_);
+        return lookup_table_.contains(label);
+    }
+
+    void export_labels(label_t* labels, std::size_t limit) const {
+        shared_lock_t lock(lookup_table_mutex_);
+        for (auto it = lookup_table_.begin(); it != lookup_table_.end() && limit; ++it, ++labels, --limit)
+            *labels = it->first;
+    }
 
     // clang-format off
     add_result_t add(label_t label, f8_bits_t const* vector) { return add_(label, vector, casts_.from_f8); }

@@ -30,22 +30,25 @@ Euclidean • Angular • Jaccard • Hamming • Haversine • User-Defined Met
 <a href="#golang">GoLang</a> •
 <a href="#wolfram">Wolfram</a>
 <br/>
-Linux • MacOS • Windows
+Linux • MacOS • Windows • Docker • WebAssembly 🔜
 </p>
 
 ---
 
 - [x] Industry-leading [performance](#performance).
 - [x] Easily-extendible [single C++11 header][usearch-header] implementation.
-- [x] [User-defined](#define-custom-metrics) and pre-packaged SIMD-accelerated metrics.
+- [x] SIMD-accelerated and [User-defined](#define-custom-metrics) metrics with JIT-compilation.
+- [x] Variable dimensionality vectors - for [obscure use-cases, like GIS and Chess][obscure-use-cases].
+- [x] Bitwise Tanimoto and Sorensen coefficients for Genomics and Chemistry.
 - [x] [Half-precision `f16` and Quarter-precision `f8`](#quantize-on-the-fly) support on any hardware.
 - [x] [View from disk](#view-larger-indexes-from-disk), without loading into RAM.
 - [x] [4B+](#go-beyond-4b-entries) sized space efficient point-clouds with `uint40_t`.
-- [x] Variable dimensionality vectors - for [obscure use-cases][obscure-use-cases].
-- [x] [Bring your threads](#bring-your-threads), like OpenMP.
+- [x] [Bring your threads](#bring-your-threads), like OpenMP or C++23 executors.
 - [x] Multiple vectors per label.
 - [ ] Thread-safe `reserve`.
-- [x] AI + Vector Search = [Semantic Search](#ai--vector-search--semantic-search).
+- [ ] On-the-fly deletions.
+- [x] USearch + UForm Transformers = [Semantic Search](#ai--vector-search--semantic-search).
+- [x] USearch + RDKit = [Molecule Search](#ai--vector-search--semantic-search).
 
 [usearch-header]: https://github.com/unum-cloud/usearch/blob/main/include/usearch/usearch.hpp
 [obscure-use-cases]: https://ashvardanian.com/posts/abusing-vector-search
@@ -494,31 +497,28 @@ func main() {
 
 ### Wolfram
 
-## TODO
 
-- JavaScript: Allow calling from "worker threads".
-- Rust: Allow passing a custom thread ID.
-- C# .NET bindings.
+## Application Examples
 
-## AI + Vector Search = Semantic Search
+### USearch + AI = Multi-Modal Semantic Search
 
 AI has a growing number of applications, but one of the coolest classic ideas is to use it for Semantic Search.
-One can take an encoder model, like the multi-modal UForm, and a web-programming framework, like UCall, and build an image search platform in just 20 lines of Python.
+One can take an encoder model, like the multi-modal UForm, and a web-programming framework, like UCall, and build a text-to-image search platform in just 20 lines of Python.
 
 ```python
-import ucall.rich_posix as ucall
+import ucall
 import uform
-from usearch.index import Index
+import usearch
 
 import numpy as np
-from PIL import Image
+import PIL as pil
 
 server = ucall.Server()
 model = uform.get_model('unum-cloud/uform-vl-multilingual')
-index = Index(ndim=256)
+index = usearch.index.Index(ndim=256)
 
 @server
-def add(label: int, photo: Image.Image):
+def add(label: int, photo: pil.Image.Image):
     image = model.preprocess_image(photo)
     vector = model.encode_image(image).detach().numpy()
     index.add(label, vector.flatten(), copy=True)
@@ -527,10 +527,112 @@ def add(label: int, photo: Image.Image):
 def search(query: str) -> np.ndarray:
     tokens = model.preprocess_text(query)
     vector = model.encode_text(tokens).detach().numpy()
-    neighbors, _, _ = index.search(vector.flatten(), 3)
-    return neighbors
+    matches = index.search(vector.flatten(), 3)
+    return matches.labels
 
 server.run()
 ```
+
+We have pre-processed some commonly used datasets, cleaning the images, producing the vectors, and pre-building the index.
+
+| Dataset                             | Size | Images |          Preprocessed |
+| :---------------------------------- | ---: | -----: | --------------------: |
+| [Unsplash 25K][unsplash-25k-origin] |    - |   25 K | [HF][unsplash-25k-hf] |
+| [Unsplash 2M][unsplash-2m-origin]   |    - |    2 M |  [HF][unsplash-2m-hf] |
+| [LAION 400M][laion-400m-origin]     |    - |  400 M |   [HF][laion-400m-hf] |
+| [LAION 5B][laion-5b-origin]         |    - |    5 B |     [HF][laion-5b-hf] |
+
+
+[unsplash-25k-origin]: https://unum.cloud
+[unsplash-2m-origin]: https://unum.cloud
+[laion-400m-origin]: https://unum.cloud
+[laion-5b-origin]: https://unum.cloud
+[unsplash-25k-hf]: https://unum.cloud
+[unsplash-2m-hf]: https://unum.cloud
+[laion-400m-hf]: https://unum.cloud
+[laion-5b-hf]: https://unum.cloud
+
+### USearch + RDKit = Molecular Search
+
+Comparing molecule graphs and searching for similar structures is expensive and slow.
+It can be seen as a special case of the NP-Complete Subgraph Isomorphism problem.
+Luckily, domain-specific approximate methods exists.
+The one commonly used in Chemistry, is to generate structures from [SMILES][smiles], and later hash them into binary fingerprints.
+The later are searchable with bitwise similarity metrics, like the Tanimoto coefficient.
+Below is na example using the RDKit package.
+
+```python
+from usearch.index import Index, MetricKind
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+import numpy as np
+
+molecules = [Chem.MolFromSmiles('CCOC'), Chem.MolFromSmiles('CCO')]
+encoder = AllChem.GetRDKitFPGenerator()
+
+fingerprints = np.vstack([encoder.GetFingerprint(x) for x in molecules])
+fingerprints = np.packbits(fingerprints, axis=1)
+
+index = Index(ndim=2048, metric=MetricKind.BitwiseTanimoto)
+labels = np.array(len(molecules), dtype=np.longlong)
+
+index.add(labels, fingerprints)
+matches = index.search(fingerprints, 10)
+```
+
+RDKit [provides][rdkit-fingerprints] following fingerprinting techniques:
+
+- Atom-Pair, 
+- Topological Torsion, 
+- Morgan,
+- Layered Fingerprints.
+
+We have preprocessed some of the most commonly used datasets, and made it available for free on the HuggingFace portal, together with visual interface.
+
+| Dataset                   |     Size |   Molecules |     Preprocessed |
+| :------------------------ | -------: | ----------: | ---------------: |
+| [PubChem][pubchem-origin] |     8 GB | 115'034'339 | [HF][pubchem-hf] |
+| [GDB 13][gdb13-origin]    |   2.3 GB | 977'468'301 |   [HF][gdb13-hf] |
+| [REAL][real-origin]       | > 100 GB |         6 B |    [HF][real-hf] |
+
+[smiles]: https://en.wikipedia.org/wiki/Simplified_molecular-input_line-entry_system
+[rdkit-fingerprints]: https://www.rdkit.org/docs/RDKit_Book.html#additional-information-about-the-fingerprints
+
+[gdb13-origin]: https://zenodo.org/record/5172018/files/gdb13.tgz?download=1
+[pubchem-origin]: ftp://ftp.ncbi.nlm.nih.gov/pubchem/Compound/Extras/CID-SMILES.gz
+[real-origin]: https://enamine.net/compound-collections/real-compounds/real-database
+[pubchem-hf]: https://unum.cloud
+[gdb13-hf]: https://unum.cloud
+[real-hf]: https://unum.cloud
+
+## TODO
+
+- JavaScript: Allow calling from "worker threads".
+- Rust: Allow passing a custom thread ID.
+- C# .NET bindings.
+
+## Integrations
+
+- [x] GPT-Cache.
+- [ ] Langchain.
+- [ ] Microsoft Semantic Kernel.
+- [ ] PyTorch.
+
+## Citations
+
+```txt
+@software{Vardanian_USearch_2022,
+doi = {10.5281/zenodo.7949416},
+author = {Vardanian, Ash},
+title = {{USearch by Unum Cloud}},
+url = {https://github.com/unum-cloud/usearch},
+version = {0.13.0},
+year = {2022}
+month = jun,
+}
+```
+
+---
 
 Check [that](https://github.com/ashvardanian/image-search) and [other](https://github.com/unum-cloud/examples) examples on our corporate GitHub 🤗

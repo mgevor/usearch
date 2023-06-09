@@ -73,8 +73,8 @@
 #include <mutex>     // `std::unique_lock` - replacement candidate
 #include <random>    // `std::default_random_engine` - replacement candidate
 #include <stdexcept> // `std::runtime_exception`
+#include <thread>    // `std::thread`
 #include <utility>   // `std::pair`
-#include <vector>    // `std::vector`
 
 // Prefetching
 #if defined(USEARCH_IS_GCC)
@@ -349,7 +349,7 @@ template <typename scalar_at, typename result_at = float> struct bitwise_tanimot
         result_t and_count{};
         result_t or_count{};
 #if defined(USEARCH_USE_OPENMP)
-#pragma omp simd reduction(+ : matches)
+#pragma omp simd reduction(+ : and_count, or_count)
 #elif defined(USEARCH_IS_CLANG)
 #pragma clang loop vectorize(enable)
 #elif defined(USEARCH_IS_GCC)
@@ -379,7 +379,7 @@ template <typename scalar_at, typename result_at = float> struct bitwise_sorense
         result_t and_count{};
         result_t any_count{};
 #if defined(USEARCH_USE_OPENMP)
-#pragma omp simd reduction(+ : matches)
+#pragma omp simd reduction(+ : and_count, any_count)
 #elif defined(USEARCH_IS_CLANG)
 #pragma clang loop vectorize(enable)
 #elif defined(USEARCH_IS_GCC)
@@ -1156,10 +1156,6 @@ static_assert(sizeof(file_header_t) == 64, "File header should be exactly 64 byt
  *
  *  To simplify the implementation, the `index_gt` lacks endpoints to remove existing
  *  vectors. That, however, is solved by `punned_gt`, which also adds automatic casting.
- *
- *  @subsection Ugly Implementation Parts
- *
- *  Internally, a number of `std::vector`-s is created, often `mutable`.
  *
  */
 template <typename metric_at = ip_gt<float>,            //
