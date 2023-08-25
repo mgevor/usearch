@@ -112,6 +112,7 @@ if(USEARCH_INSTALL)
     )
 endif()
 
+message("000000000000000")
 if(${USEARCH_BUILD_TEST} OR ${USEARCH_BUILD_BENCHMARK})
     message("aaaaaaaaaaaaaaaaaa")
     add_subdirectory(c)
