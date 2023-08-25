@@ -23,7 +23,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
       with:
-        ref: main-dev
+        ref: debug_C_build
     - run: git submodule update --init --recursive
     - name: Prepare Environment
       run: |
